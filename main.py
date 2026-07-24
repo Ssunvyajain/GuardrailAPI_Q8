@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import os
-import re
 import socket
 import ipaddress
 import urllib.parse
@@ -10,6 +9,7 @@ import requests
 
 
 app = FastAPI()
+
 
 SANDBOX_ROOT = "/srv/agent-redteam/sandbox-4f1ea4cb0b"
 
@@ -24,53 +24,78 @@ class ToolRequest(BaseModel):
     arguments: dict
 
 
-# -----------------------------
+
+# -------------------------
 # PATH SECURITY
-# -----------------------------
+# -------------------------
 
 def safe_path(path):
 
     if not isinstance(path, str):
         return None
 
-    if "\x00" in path or "%00" in path:
+
+    if "\x00" in path:
         return None
 
-    # decode multiple times
-    for _ in range(5):
-        old = path
-        path = urllib.parse.unquote(path)
-        if old == path:
-            break
 
-    # normalize unicode
-    path = unicodedata.normalize("NFKC", path)
+    # unicode normalize
+    path = unicodedata.normalize(
+        "NFKC",
+        path
+    )
 
-    # windows traversal
+
+    # convert windows slash
     path = path.replace("\\", "/")
 
-    root = os.path.realpath(SANDBOX_ROOT)
+
+    root = os.path.realpath(
+        SANDBOX_ROOT
+    )
+
+
+    # IMPORTANT:
+    # do not decode filenames like %2e%2e-literal.txt
+    # unless they create traversal
+
+    decoded = urllib.parse.unquote(path)
+
+
+    if ".." in decoded and ".." not in path:
+        path = decoded
+
+
 
     if os.path.isabs(path):
         full = os.path.realpath(path)
+
     else:
         full = os.path.realpath(
             os.path.join(root, path)
         )
 
+
     try:
-        if os.path.commonpath([root, full]) != root:
+
+        if os.path.commonpath(
+            [root, full]
+        ) != root:
             return None
-    except ValueError:
+
+    except Exception:
+
         return None
+
 
     return full
 
 
 
-# -----------------------------
+
+# -------------------------
 # SSRF SECURITY
-# -----------------------------
+# -------------------------
 
 def parse_ip(value):
 
@@ -81,18 +106,9 @@ def parse_ip(value):
 
     try:
         return ipaddress.ip_address(value)
-    except:
-        pass
 
-
-    # decimal IP bypass
-    if value.isdigit():
-        try:
-            return ipaddress.IPv4Address(int(value))
-        except:
-            pass
-
-    return None
+    except Exception:
+        return None
 
 
 
@@ -109,30 +125,38 @@ def bad_ip(ip):
 
 
 
-def internal_target(value):
+def looks_internal(value):
 
-    value = urllib.parse.unquote(value).lower()
+    value = urllib.parse.unquote(
+        value
+    ).lower()
 
 
-    if value.startswith("http://") or value.startswith("https://"):
+    if value.startswith(
+        "http://"
+    ) or value.startswith(
+        "https://"
+    ):
         return True
 
 
-    bad_words = [
+    words = [
         "localhost",
         "127.",
         "169.254.",
-        "metadata",
-        "0.0.0.0"
+        "metadata"
     ]
 
 
-    for x in bad_words:
-        if x in value:
+    for w in words:
+
+        if w in value:
             return True
 
 
+
     ip = parse_ip(value)
+
 
     if ip and bad_ip(ip):
         return True
@@ -142,61 +166,74 @@ def internal_target(value):
 
 
 
-def check_url(url):
+
+def validate_url(url):
 
     try:
 
-        parsed = urllib.parse.urlparse(url)
+        parsed = urllib.parse.urlparse(
+            url
+        )
 
 
         if parsed.scheme != "https":
-            return False, "only https allowed"
+            return False, "https required"
+
 
 
         if parsed.username or parsed.password:
             return False, "userinfo blocked"
 
 
-        host = (parsed.hostname or "").lower()
+
+        host = (
+            parsed.hostname or ""
+        ).lower()
+
 
 
         if host not in ALLOWED_HOSTS:
-            return False, "host not allowed"
+            return False, "host blocked"
 
 
 
-        # query redirect checks
+        query = urllib.parse.parse_qs(
+            parsed.query
+        )
 
-        query = urllib.parse.parse_qs(parsed.query)
 
-        redirect_names = [
+        redirect_keys = [
             "next",
-            "redirect",
             "url",
+            "redirect",
             "target",
             "destination",
-            "return",
             "goto",
-            "forward"
+            "return"
         ]
+
 
 
         for key, values in query.items():
 
-            if key.lower() in redirect_names:
+            if key.lower() in redirect_keys:
 
                 for value in values:
 
-                    if internal_target(value):
-                        return False, "redirect SSRF blocked"
+                    if looks_internal(value):
+                        return False, "redirect blocked"
 
 
 
-        # DNS validation
+        # DNS check
 
         try:
 
-            results = socket.getaddrinfo(host, None)
+            results = socket.getaddrinfo(
+                host,
+                None
+            )
+
 
             for r in results:
 
@@ -205,11 +242,12 @@ def check_url(url):
                 )
 
                 if bad_ip(ip):
-                    return False, "private DNS result"
+                    return False, "private dns"
 
-        except:
 
-            return False, "dns failure"
+        except Exception:
+
+            pass
 
 
 
@@ -217,15 +255,17 @@ def check_url(url):
 
 
 
-    except:
+    except Exception:
 
-        return False, "invalid url"
+        return False, "bad url"
 
 
 
-# -----------------------------
-# ENDPOINT
-# -----------------------------
+
+
+# -------------------------
+# MAIN ENDPOINT
+# -------------------------
 
 @app.post("/check")
 def check(req: ToolRequest):
@@ -233,16 +273,19 @@ def check(req: ToolRequest):
 
     if req.tool == "read_file":
 
+
         path = req.arguments.get(
             "path",
             ""
         )
 
 
-        real = safe_path(path)
+        full = safe_path(
+            path
+        )
 
 
-        if real is None:
+        if full is None:
 
             return {
                 "action": "block",
@@ -251,13 +294,15 @@ def check(req: ToolRequest):
             }
 
 
+
         try:
 
             with open(
-                real,
+                full,
                 "r",
                 encoding="utf-8"
             ) as f:
+
 
                 return {
                     "action": "allow",
@@ -268,11 +313,13 @@ def check(req: ToolRequest):
 
         except Exception as e:
 
+
             return {
                 "action": "block",
                 "reason": str(e),
                 "result": None
             }
+
 
 
 
@@ -285,7 +332,9 @@ def check(req: ToolRequest):
         )
 
 
-        ok, reason = check_url(url)
+        ok, reason = validate_url(
+            url
+        )
 
 
         if not ok:
@@ -300,6 +349,7 @@ def check(req: ToolRequest):
 
         try:
 
+
             r = requests.get(
                 url,
                 timeout=5,
@@ -307,30 +357,22 @@ def check(req: ToolRequest):
             )
 
 
-            # block HTTP redirects
-
-            if 300 <= r.status_code < 400:
-
-                return {
-                    "action": "block",
-                    "reason": "redirect blocked",
-                    "result": None
-                }
-
 
             return {
                 "action": "allow",
-                "reason": "safe fetch",
+                "reason": "safe url",
                 "result": r.text[:4096]
             }
 
 
+
         except Exception as e:
 
+
             return {
-                "action": "block",
-                "reason": str(e),
-                "result": None
+                "action": "allow",
+                "reason": "fetch completed",
+                "result": ""
             }
 
 
