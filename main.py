@@ -35,37 +35,62 @@ setup_files()
 
 
 def inside_sandbox(path):
+
     if os.path.isabs(path):
         full = os.path.normpath(path)
     else:
-        full = os.path.normpath(os.path.join(SANDBOX, path))
+        full = os.path.normpath(
+            os.path.join(SANDBOX, path)
+        )
 
-    return full == SANDBOX or full.startswith(SANDBOX + os.sep)
+    return (
+        full == SANDBOX
+        or full.startswith(SANDBOX + os.sep)
+    )
 
 
+# FIXED: does not overblock safe URLs
 def internal_target(value):
-    value = value.lower()
+
+    value = value.lower().strip()
+
 
     if "localhost" in value:
         return True
 
+
     if "127.0.0.1" in value:
         return True
 
-    if "169.254." in value:
+
+    if "169.254.169.254" in value:
         return True
 
-    if value.startswith("http://") or value.startswith("https://"):
-        return True
 
     try:
-        ip = ipaddress.ip_address(value)
-        if ip.is_private:
-            return True
-    except:
+
+        parsed = urlparse(value)
+
+        host = parsed.hostname
+
+        if host:
+
+            ip = ipaddress.ip_address(host)
+
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+            ):
+                return True
+
+
+    except Exception:
         pass
 
+
     return False
+
 
 
 @app.get("/")
@@ -75,6 +100,7 @@ def home():
     }
 
 
+
 @app.post("/check")
 def check(data: dict):
 
@@ -82,27 +108,33 @@ def check(data: dict):
     args = data.get("arguments", {})
 
 
+
     # =========================
-    # READ FILE GUARDRAIL
+    # READ FILE
     # =========================
+
     if tool == "read_file":
 
         path = args.get("path", "")
 
+
         if not inside_sandbox(path):
+
             return {
                 "action": "block",
                 "reason": "Path escapes sandbox"
             }
 
 
-        # Convert allowed sandbox path to Render storage path
         if os.path.isabs(path):
+
             real_path = path.replace(
                 SANDBOX,
                 REAL_SANDBOX
             )
+
         else:
+
             real_path = os.path.join(
                 REAL_SANDBOX,
                 path
@@ -110,14 +142,18 @@ def check(data: dict):
 
 
         try:
+
             with open(real_path, "r") as f:
+
                 return {
                     "action": "allow",
                     "reason": "File allowed",
                     "result": f.read()
                 }
 
+
         except Exception as e:
+
             return {
                 "action": "allow",
                 "reason": "File allowed but unavailable",
@@ -126,16 +162,20 @@ def check(data: dict):
 
 
 
+
     # =========================
-    # FETCH URL GUARDRAIL
+    # FETCH URL
     # =========================
+
     if tool == "fetch_url":
 
         url = args.get("url", "")
 
         parsed = urlparse(url)
 
-        host = (parsed.hostname or "").lower()
+        host = (
+            parsed.hostname or ""
+        ).lower()
 
 
         allowed_hosts = [
@@ -145,28 +185,38 @@ def check(data: dict):
 
 
         if host not in allowed_hosts:
+
             return {
                 "action": "block",
                 "reason": "Host not allowed"
             }
 
 
-        # Detect redirect tricks
-        for values in parse_qs(parsed.query).values():
+
+        # Check redirect parameters
+        for values in parse_qs(
+            parsed.query
+        ).values():
+
             for value in values:
+
                 if internal_target(value):
+
                     return {
                         "action": "block",
                         "reason": "Suspicious redirect"
                     }
 
 
+
         try:
+
             response = requests.get(
                 url,
                 timeout=5,
                 allow_redirects=False
             )
+
 
             return {
                 "action": "allow",
@@ -175,7 +225,9 @@ def check(data: dict):
             }
 
 
+
         except Exception as e:
+
             return {
                 "action": "allow",
                 "reason": "Allowed host",
