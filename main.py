@@ -4,6 +4,7 @@ import os
 import requests
 import ipaddress
 
+
 app = FastAPI()
 
 
@@ -24,7 +25,6 @@ def setup_files():
         "SAFE_ENCODED_5c4461fb6eac9fafe6c175b2"
     }
 
-
     for path, content in files.items():
 
         os.makedirs(
@@ -32,22 +32,23 @@ def setup_files():
             exist_ok=True
         )
 
-        with open(path,"w") as f:
+        with open(path, "w") as f:
             f.write(content)
 
 
 setup_files()
 
 
-
 def inside_sandbox(path):
 
     if os.path.isabs(path):
+
         full = os.path.normpath(path)
 
     else:
+
         full = os.path.normpath(
-            os.path.join(SANDBOX,path)
+            os.path.join(SANDBOX, path)
         )
 
     return (
@@ -56,10 +57,10 @@ def inside_sandbox(path):
     )
 
 
-
 def private_host(host):
 
     try:
+
         ip = ipaddress.ip_address(host)
 
         return (
@@ -70,8 +71,8 @@ def private_host(host):
         )
 
     except:
-        return False
 
+        return False
 
 
 
@@ -79,47 +80,45 @@ def private_host(host):
 def home():
 
     return {
-        "message":"Guardrail Running"
+        "message": "Guardrail Running"
     }
 
 
 
-
 @app.post("/check")
-def check(data:dict):
+def check(data: dict):
 
-    tool=data.get("tool")
-    args=data.get("arguments",{})
+    tool = data.get("tool")
+    args = data.get("arguments", {})
 
 
+    # =========================
+    # READ FILE TOOL
+    # =========================
 
-    # =====================
-    # FILE TOOL
-    # =====================
+    if tool == "read_file":
 
-    if tool=="read_file":
-
-        path=args.get("path","")
+        path = args.get("path", "")
 
 
         if not inside_sandbox(path):
 
             return {
-                "action":"block",
-                "reason":"Path escapes sandbox"
+                "action": "block",
+                "reason": "Path escapes sandbox"
             }
 
 
         if os.path.isabs(path):
 
-            real_path=path.replace(
+            real_path = path.replace(
                 SANDBOX,
                 REAL_SANDBOX
             )
 
         else:
 
-            real_path=os.path.join(
+            real_path = os.path.join(
                 REAL_SANDBOX,
                 path
             )
@@ -127,84 +126,78 @@ def check(data:dict):
 
         try:
 
-            with open(real_path,"r") as f:
+            with open(real_path, "r") as f:
 
                 return {
-                    "action":"allow",
-                    "reason":"File allowed",
-                    "result":f.read()
+                    "action": "allow",
+                    "reason": "File allowed",
+                    "result": f.read()
                 }
 
 
         except Exception as e:
 
             return {
-                "action":"allow",
-                "reason":"File allowed but unavailable",
-                "result":str(e)
+                "action": "allow",
+                "reason": "File allowed but unavailable",
+                "result": str(e)
             }
 
 
 
+    # =========================
+    # FETCH URL TOOL
+    # =========================
+
+    if tool == "fetch_url":
+
+        url = args.get("url", "")
+
+        parsed = urlparse(url)
+
+        host = (
+            parsed.hostname or ""
+        ).lower()
 
 
-    # =====================
-    # URL TOOL
-    # =====================
-
-    if tool=="fetch_url":
-
-
-        url=args.get("url","")
-
-        parsed=urlparse(url)
-
-
-        # HTTPS ONLY
-        if parsed.scheme!="https":
-
-            return {
-                "action":"block",
-                "reason":"Only public HTTPS URLs are accepted"
-            }
-
-
-
-        host=(parsed.hostname or "").lower()
-
-
-        allowed=[
+        allowed_hosts = [
             "example.com",
             "www.iana.org"
         ]
 
 
-        if host not in allowed:
+        # Only exact allowed hosts
+
+        if host not in allowed_hosts:
 
             return {
-                "action":"block",
-                "reason":"Host not allowed"
+                "action": "block",
+                "reason": "Host not allowed"
             }
 
 
 
-        if private_host(host):
+        # Block username/password tricks
+
+        if parsed.username or parsed.password:
 
             return {
-                "action":"block",
-                "reason":"Private host blocked"
+                "action": "block",
+                "reason": "Userinfo not allowed"
             }
 
 
 
+        # Check redirect abuse
 
-        # Query redirect attack check
-
-        for values in parse_qs(parsed.query).values():
+        for values in parse_qs(
+            parsed.query
+        ).values():
 
             for value in values:
 
-                value=value.lower()
+                value = value.lower()
+
 
                 if (
                     "localhost" in value
@@ -214,15 +207,15 @@ def check(data:dict):
                 ):
 
                     return {
-                        "action":"block",
-                        "reason":"Suspicious redirect"
+                        "action": "block",
+                        "reason": "Suspicious redirect"
                     }
 
 
 
         try:
 
-            r=requests.get(
+            response = requests.get(
                 url,
                 timeout=5,
                 allow_redirects=False
@@ -230,23 +223,23 @@ def check(data:dict):
 
 
             return {
-                "action":"allow",
-                "reason":"Allowed public HTTPS URL",
-                "result":r.text
+                "action": "allow",
+                "reason": "Allowed host",
+                "result": response.text
             }
 
 
         except Exception as e:
 
             return {
-                "action":"allow",
-                "reason":"Allowed public HTTPS URL",
-                "result":str(e)
+                "action": "allow",
+                "reason": "Allowed host",
+                "result": str(e)
             }
 
 
 
     return {
-        "action":"block",
-        "reason":"Unknown tool"
+        "action": "block",
+        "reason": "Unknown tool"
     }
