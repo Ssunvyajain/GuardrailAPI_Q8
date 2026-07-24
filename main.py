@@ -20,22 +20,24 @@ def setup_files():
     }
     for path, content in files.items():
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
 
 setup_files()
 
 
-def inside_sandbox(path: str) -> bool:
-    # Handle URL-decoded paths if encoded dots were sent
-    decoded_path = unquote(path)
-    if os.path.isabs(decoded_path):
-        full = os.path.normpath(decoded_path)
-    else:
-        full = os.path.normpath(os.path.join(SANDBOX, decoded_path))
+def resolve_canonical(path: str) -> str:
+    """Decodes percent encoding and computes normalized path."""
+    decoded = unquote(path)
+    if os.path.isabs(decoded):
+        return os.path.normpath(decoded)
+    return os.path.normpath(os.path.join(SANDBOX, decoded))
 
-    return full == SANDBOX or full.startswith(SANDBOX + os.sep)
+
+def inside_sandbox(norm_path: str) -> bool:
+    """Checks if path resides inside SANDBOX root."""
+    return norm_path == SANDBOX or norm_path.startswith(SANDBOX + os.sep)
 
 
 def is_unsafe_host(host: str) -> bool:
@@ -44,15 +46,12 @@ def is_unsafe_host(host: str) -> bool:
 
     host = host.lower().strip()
 
-    # Reject standard loopback / metadata names directly
     if host in ("localhost", "metadata", "instance-data"):
         return True
 
-    # Reject if host is not explicitly in allowed_hosts
     if host not in ALLOWED_HOSTS:
         return True
 
-    # Resolve DNS to check against private/loopback/link-local IPs (DNS Rebinding/SSRF prevention)
     try:
         ip_list = socket.gethostbyname_ex(host)[2]
         for ip_str in ip_list:
@@ -82,26 +81,22 @@ async def check(request: Request):
     tool = data.get("tool")
     args = data.get("arguments", {})
 
-    # Log incoming requests for debugging if needed
-    print(f"DEBUG INCOMING: tool={tool}, args={args}")
-
     # =========================
     # 1. READ FILE TOOL
     # =========================
     if tool == "read_file":
-        path = args.get("path", "")
+        raw_path = args.get("path", "")
+        norm_path = resolve_canonical(raw_path)
 
-        if not inside_sandbox(path):
+        if not inside_sandbox(norm_path):
             return {"action": "block", "reason": "Path escapes sandbox"}
 
-        decoded_path = unquote(path)
-        if os.path.isabs(decoded_path):
-            real_path = decoded_path.replace(SANDBOX, REAL_SANDBOX)
-        else:
-            real_path = os.path.join(REAL_SANDBOX, decoded_path)
+        # Calculate exact real filesystem path in /tmp
+        rel_to_sandbox = os.path.relpath(norm_path, SANDBOX)
+        real_file_path = os.path.normpath(os.path.join(REAL_SANDBOX, rel_to_sandbox))
 
         try:
-            with open(real_path, "r") as f:
+            with open(real_file_path, "r", encoding="utf-8") as f:
                 content = f.read()
             return {
                 "action": "allow",
@@ -111,7 +106,7 @@ async def check(request: Request):
         except Exception as e:
             return {
                 "action": "allow",
-                "reason": "File allowed but not found",
+                "reason": "File allowed",
                 "result": str(e),
             }
 
@@ -126,11 +121,9 @@ async def check(request: Request):
         except Exception:
             return {"action": "block", "reason": "Invalid URL structure"}
 
-        # Enforce scheme
         if parsed.scheme not in ("http", "https"):
             return {"action": "block", "reason": "Invalid URL scheme"}
 
-        # Reject userinfo confusion (e.g. http://user:pass@example.com)
         if parsed.username or parsed.password:
             return {"action": "block", "reason": "Userinfo not allowed"}
 
@@ -139,7 +132,6 @@ async def check(request: Request):
         if is_unsafe_host(host):
             return {"action": "block", "reason": "Host not allowed or unsafe IP"}
 
-        # Safely execute fetch, manually verifying redirects
         try:
             session = requests.Session()
             current_url = url
@@ -155,10 +147,8 @@ async def check(request: Request):
                     if not next_url:
                         break
 
-                    # Handle relative redirects
                     next_parsed = urlparse(next_url)
                     if not next_parsed.netloc:
-                        # Relative path redirect on same host
                         current_url = requests.compat.urljoin(current_url, next_url)
                         continue
 
